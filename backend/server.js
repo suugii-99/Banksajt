@@ -1,105 +1,100 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
+import Database from 'better-sqlite3';
 
 const app = express();
 const port = 3001;
 
-// Middleware
 app.use(cors());
 app.use(bodyParser.json());
 
-// Arrayer
-const users = [];
-const accounts = [];
-const sessions = [];
+// Skapa eller öppna SQLite-databasen
+const db = new Database('bank.db');
 
-// Generera engångslösenord
+// Skapa tabeller om de inte finns
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE,
+  password TEXT
+);
+CREATE TABLE IF NOT EXISTS accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  userId INTEGER,
+  amount INTEGER,
+  FOREIGN KEY (userId) REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  userId INTEGER,
+  token TEXT,
+  FOREIGN KEY (userId) REFERENCES users(id)
+);
+`);
+
+// Generera OTP
 function generateOTP() {
   const otp = Math.floor(100000 + Math.random() * 900000);
   return otp.toString();
 }
 
-// Skapa användare
+// POST /users - skapa användare
 app.post('/users', (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Användarnamn och lösenord krävs' });
+  try {
+    const insertUser = db.prepare('INSERT INTO users (username, password) VALUES (?, ?)');
+    const result = insertUser.run(username, password);
+    const userId = result.lastInsertRowid;
+    const insertAccount = db.prepare('INSERT INTO accounts (userId, amount) VALUES (?, ?)');
+    insertAccount.run(userId, 0);
+    res.json({ message: 'User created', userId });
+  } catch (error) {
+    res.status(400).json({ error: 'Username already exists' });
   }
-
-  if (users.find(u => u.username === username)) {
-    return res.status(400).json({ error: 'Användarnamn finns redan' });
-  }
-
-  const id = users.length ? users[users.length - 1].id + 1 : 101;
-  users.push({ id, username, password });
-  accounts.push({ id: accounts.length + 1, userId: id, amount: 0 });
-
-  res.json({ message: 'Användare skapad', userId: id });
 });
 
-// Logga in och skapa session (engångslösenord)
+// POST /sessions - logga in och skapa session token
 app.post('/sessions', (req, res) => {
   const { username, password } = req.body;
-  const user = users.find(u => u.username === username && u.password === password);
+  const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(username, password);
   if (!user) {
-    return res.status(401).json({ error: 'Fel användarnamn eller lösenord' });
+    return res.status(401).json({ error: 'Invalid credentials' });
   }
-
-  // Skapa engångslösenord
   const token = generateOTP();
-
-  // Lägg till session (uppdatera om redan finns)
-  const existingSessionIndex = sessions.findIndex(s => s.userId === user.id);
-  if (existingSessionIndex >= 0) {
-    sessions[existingSessionIndex].token = token;
-  } else {
-    sessions.push({ userId: user.id, token });
-  }
-
-  res.json({ token, userId: user.id });
+  // Ta bort gammal session för användaren
+  db.prepare('DELETE FROM sessions WHERE userId = ?').run(user.id);
+  // Spara ny token
+  db.prepare('INSERT INTO sessions (userId, token) VALUES (?, ?)').run(user.id, token);
+  res.json({ token });
 });
 
-// Visa saldo
+// POST /me/accounts - visa saldo (kräver token)
 app.post('/me/accounts', (req, res) => {
-  const { token, userId } = req.body;
-
-  const session = sessions.find(s => s.userId === userId && s.token === token);
+  const { token } = req.body;
+  const session = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
   if (!session) {
     return res.status(401).json({ error: 'Invalid token' });
   }
-
-  const account = accounts.find(a => a.userId === userId);
-  if (!account) {
-    return res.status(404).json({ error: 'Konto hittades inte' });
-  }
-
+  const account = db.prepare('SELECT * FROM accounts WHERE userId = ?').get(session.userId);
   res.json({ amount: account.amount });
 });
 
-// Sätt in pengar
+// POST /me/accounts/transactions - sätt in pengar (kräver token och amount)
 app.post('/me/accounts/transactions', (req, res) => {
-  const { token, userId, amount } = req.body;
-
-  const session = sessions.find(s => s.userId === userId && s.token === token);
+  const { token, amount } = req.body;
+  const session = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
   if (!session) {
     return res.status(401).json({ error: 'Invalid token' });
   }
-
-  const account = accounts.find(a => a.userId === userId);
-  if (!account) {
-    return res.status(404).json({ error: 'Konto hittades inte' });
-  }
-
   if (typeof amount !== 'number' || amount <= 0) {
-    return res.status(400).json({ error: 'Felaktigt belopp' });
+    return res.status(400).json({ error: 'Invalid amount' });
   }
-
-  account.amount += amount;
-  res.json({ newBalance: account.amount });
+  const updateAccount = db.prepare('UPDATE accounts SET amount = amount + ? WHERE userId = ?');
+  updateAccount.run(amount, session.userId);
+  const account = db.prepare('SELECT * FROM accounts WHERE userId = ?').get(session.userId);
+  res.json({ message: 'Deposit successful', amount: account.amount });
 });
 
-// Starta server
 app.listen(port, () => {
   console.log(`Bankens backend körs på http://localhost:${port}`);
 });

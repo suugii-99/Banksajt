@@ -46,10 +46,10 @@ export default function Account() {
     }
 
     try {
-      const response = await fetch('http://localhost:3001/me/accounts/transactions', {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/me/accounts/transactions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, userId: Number(userId), amount: numAmount }),
+        body: JSON.stringify({ token, amount: amountInt }),
       });
       const data = await response.json();
 
